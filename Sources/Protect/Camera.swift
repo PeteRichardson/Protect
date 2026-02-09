@@ -8,15 +8,15 @@
 public struct Camera: ProtectFetchable {
     //static let v1APIPath = "cameras"
     public static let urlSuffix = "cameras"
-    
+
     public var id: String
-    var state: String
+    public var state: String
     public var name: String
-    var isMicEnabled: Bool
-    var micVolume: Int
-    var videoMode: String
-    var hdrType : String
-    
+    public var isMicEnabled: Bool
+    public var micVolume: Int
+    public var videoMode: String
+    public var hdrType: String
+
     // NOT IMPLEMENTED YET
     // osdSettings
     // ledSettings
@@ -26,13 +26,12 @@ public struct Camera: ProtectFetchable {
     // activePatrolSlot
     // modelKey
 
-
-    public static let csvHeader : String = "name,id,state,isMicEnabled,micVolume,videoMode,hdrType"
+    public static let csvHeader: String = "name,id,state,isMicEnabled,micVolume,videoMode,hdrType"
 
     public var description: String {
         "\(name.padded(to:17)) <\(id)> [\(state)]"
     }
-    
+
     public func csvDescription() -> String {
         "\(name),\(id),\(state),\(isMicEnabled),\(micVolume),\(videoMode),\(hdrType)"
     }
