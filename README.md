@@ -1,6 +1,6 @@
 # Protect
 
-A Swift package for interacting with the Unifi Protect API, providing a clean and type-safe interface for managing cameras, liveviews, and viewports.
+A Swift package for interacting with a subset of the Unifi Protect API, providing a clean and type-safe interface for managing cameras, liveviews, and viewports.
 
 ## Features
 
