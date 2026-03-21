@@ -227,7 +227,7 @@ All requests include authentication via the `X-API-KEY` header.
 
 ### Logging
 
-The package uses `OSLog` for structured logging. You can monitor API requests and responses using Console.app by filtering for the `com.peterichardson.protect` subsystem.
+The package uses `OSLog` for structured logging. You can monitor API requests and responses using Console.app by filtering for the `ProtectService` category.
 
 ## Error Handling
 
