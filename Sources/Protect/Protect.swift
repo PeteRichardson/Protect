@@ -177,8 +177,9 @@ public class ProtectService {
         allHeaders.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // Header names only: the values include X-API-KEY, which must never reach the log.
         logger.trace(
-            "[\(requestId, privacy: .public)] Request headers: \(request.allHTTPHeaderFields ?? [:], privacy: .public)"
+            "[\(requestId, privacy: .public)] Request header keys: \(request.allHTTPHeaderFields?.keys.sorted().joined(separator: ", ") ?? "", privacy: .public)"
         )
         if let method = method {
             request.httpMethod = method
