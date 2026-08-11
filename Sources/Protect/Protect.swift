@@ -18,11 +18,31 @@ enum MIMEType: String {
 }
 
 /// Errors thrown by `ProtectService`.
+///
+/// Every failure the package originates is one of these cases, so a caller can distinguish
+/// them by pattern-matching rather than by reading a status code out of an `NSError` or
+/// matching on a localized string. Errors raised by `URLSession` itself — no route to the
+/// host, a TLS trust failure, a cancelled task — still surface as `URLError`.
 public enum ProtectError: Error, Equatable, LocalizedError {
     /// The host supplied at initialization could not form a valid URL.
     ///
     /// The associated value is the host exactly as the caller supplied it.
     case invalidHost(String)
+
+    /// No camera on the console matched the requested name.
+    ///
+    /// The associated value is the name that was searched for. Matching is case-insensitive.
+    case cameraNotFound(String)
+
+    /// The console answered with a non-2xx status.
+    ///
+    /// `body` carries the server's response body, truncated, when it sent one — the Protect
+    /// API returns a JSON payload explaining *why* a request failed, and it is usually more
+    /// specific than the status code alone. It is `nil` when the response had no body.
+    case httpStatus(Int, body: String?)
+
+    /// The response was not an HTTP response at all, so there is no status code to report.
+    case invalidResponse
 
     public var errorDescription: String? {
         switch self {
@@ -32,6 +52,15 @@ public enum ProtectError: Error, Equatable, LocalizedError {
                 optionally with a port and nothing else — for example '192.168.1.1', \
                 'protect.local', or '10.0.0.1:7443'.
                 """
+        case .cameraNotFound(let name):
+            return "No camera named '\(name)' was found on this console."
+        case .httpStatus(let code, let body):
+            let status = HTTPURLResponse.localizedString(forStatusCode: code)
+            let base = "The console returned HTTP \(code) (\(status))."
+            guard let body else { return base }
+            return "\(base) Response: \(body)"
+        case .invalidResponse:
+            return "The console's reply was not a valid HTTP response."
         }
     }
 }
@@ -194,15 +223,12 @@ public class ProtectService {
     ///   - camera: The name of the camera to get a snapshot from
     ///   - quality: If true, requests a high-quality snapshot
     /// - Returns: The snapshot image data in JPEG format
-    /// - Throws: An error if the camera is not found or the API request fails
+    /// - Throws: ``ProtectError/cameraNotFound(_:)`` if no camera matches `camera`, or any
+    ///   error the underlying request raises.
     public func getSnapshot(from camera: String, with quality: Bool) async throws -> Data {
         logger.debug("Getting snapshot for camera '\(camera, privacy: .public)'")
         guard let cameraId = try await lookupCameraId(byName: camera) else {
-            throw NSError(
-                domain: "ProtectService", code: 1001,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Camera '\(camera)' not found"
-                ])
+            throw ProtectError.cameraNotFound(camera)
         }
 
         let url = baseURL.appendingPathComponent("/cameras/\(cameraId)/snapshot")
@@ -292,28 +318,51 @@ public class ProtectService {
         let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
+            throw ProtectError.invalidResponse
         }
         logger.debug(
             "[\(requestId, privacy: .public)] Received response: \(httpResponse.statusCode)")
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            throw NSError(
-                domain: "ProtectService",
-                code: httpResponse.statusCode,
-                userInfo: [
-                    NSLocalizedDescriptionKey: HTTPURLResponse.localizedString(
-                        forStatusCode: httpResponse.statusCode)
-                ]
-            )
+            // The Protect API explains the failure in the body; the status code alone rarely
+            // distinguishes a bad API key from a missing camera.
+            throw ProtectError.httpStatus(
+                httpResponse.statusCode, body: Self.errorBody(from: data))
         }
 
-        let bodySnippet = String(decoding: data.prefix(200), as: UTF8.self)
+        // `.private` because a response body is camera names, IDs, and states — household
+        // topology that has no business being persisted to the system-wide log.
+        let bodySnippet = String(decoding: data.prefix(Self.loggedBodyLimit), as: UTF8.self)
         logger.debug(
-            "[\(requestId, privacy: .public)] Response body (first 200 chars): \(bodySnippet, privacy: .public)"
+            "[\(requestId, privacy: .public)] Response body (first \(Self.loggedBodyLimit, privacy: .public) chars): \(bodySnippet, privacy: .private)"
         )
 
         return data
+    }
+
+    /// How much of a response body is written to the debug log.
+    private static let loggedBodyLimit = 200
+
+    /// How much of an error response body is carried in a thrown ``ProtectError``.
+    ///
+    /// Larger than ``loggedBodyLimit`` because this one has to survive as a diagnostic — a
+    /// truncated JSON error payload is materially less useful than a whole one.
+    static let errorBodyLimit = 1024
+
+    /// Renders a response body for inclusion in a thrown error.
+    ///
+    /// - Parameters:
+    ///   - data: The raw response body.
+    ///   - limit: Maximum number of bytes to include before truncating.
+    /// - Returns: The body as text, truncated and marked as such when it exceeds `limit`, or
+    ///   `nil` when the response carried no body worth reporting. `nil` rather than `""` so
+    ///   that ``ProtectError/httpStatus(_:body:)`` can omit the section entirely.
+    static func errorBody(from data: Data, limit: Int = errorBodyLimit) -> String? {
+        guard !data.isEmpty else { return nil }
+        let text = String(decoding: data.prefix(limit), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return data.count > limit ? "\(text)… (truncated)" : text
     }
 
     /// Looks up a liveview name by its ID
