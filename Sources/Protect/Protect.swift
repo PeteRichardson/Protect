@@ -17,6 +17,65 @@ enum MIMEType: String {
     case jpeg = "application/jpeg"
 }
 
+/// Errors thrown by `ProtectService`.
+public enum ProtectError: Error, Equatable, LocalizedError {
+    /// The host supplied at initialization could not form a valid URL.
+    ///
+    /// The associated value is the host exactly as the caller supplied it.
+    case invalidHost(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidHost(let host):
+            return """
+                '\(host)' is not a valid UniFi Protect host. Supply a hostname or IP address, \
+                optionally with a port and nothing else — for example '192.168.1.1', \
+                'protect.local', or '10.0.0.1:7443'.
+                """
+        }
+    }
+}
+
+/// Accepts the self-signed certificate a UniFi console presents, for one host only.
+///
+/// UniFi consoles serve the integration API over HTTPS with a self-signed certificate, and a
+/// publicly-trusted certificate cannot be issued for a private IP address at all. Default TLS
+/// evaluation therefore rejects every request to a console on a LAN. This delegate narrows the
+/// exception as far as it can go while still connecting: any host other than the one the
+/// service was initialized with falls through to default handling, as does any challenge that
+/// isn't a server-trust challenge.
+///
+/// This trusts *whatever* certificate the configured host presents, so it does not defend
+/// against an attacker who can already redirect traffic for that host. What it does buy over
+/// plain HTTP is encryption of the `X-API-KEY` header in transit against a passive observer on
+/// the network.
+final class SelfSignedTrustDelegate: NSObject, URLSessionDelegate {
+    /// The only host for which the certificate check is relaxed.
+    private let trustedHost: String
+
+    init(trustedHost: String) {
+        self.trustedHost = trustedHost
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (
+            URLSession.AuthChallengeDisposition, URLCredential?
+        ) -> Void
+    ) {
+        guard
+            challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+            challenge.protectionSpace.host == trustedHost,
+            let serverTrust = challenge.protectionSpace.serverTrust
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+}
+
 /// Service class for interacting with the UniFi Protect API
 ///
 /// `ProtectService` provides methods to fetch cameras, liveviews, and viewports from a UniFi Protect instance,
@@ -24,7 +83,7 @@ enum MIMEType: String {
 ///
 /// Example usage:
 /// ```swift
-/// let service = ProtectService(host: "192.168.1.1", apiKey: "your-api-key")
+/// let service = try ProtectService(host: "192.168.1.1", apiKey: "your-api-key")
 /// let cameras = try await service.cameras()
 /// ```
 public class ProtectService {
@@ -38,27 +97,65 @@ public class ProtectService {
     /// Cache for viewport data to avoid redundant API calls
     private var cachedViewports: [Viewport]? = nil
 
-    /// The hostname or IP address of the UniFi Protect controller
-    private let host: String
     /// The API key for authentication with the Protect API
     private let apiKey: String
 
     /// Additional HTTP headers for API requests
     private var headers: [String: String] = [:]
 
+    /// The session all requests go through.
+    ///
+    /// An instance session rather than `URLSession.shared`, because only an instance session
+    /// can carry the delegate that accepts a UniFi console's self-signed certificate.
+    private let session: URLSession
+
+    /// The path the integration API is served under, appended to the host.
+    private static let apiPath = "/proxy/protect/integration/v1"
+
     /// The base URL for the Protect API v1 integration endpoint
-    var base_url: URL {
-        URL(string: "http://\(host)/proxy/protect/integration/v1")!
-    }
+    ///
+    /// Validated and resolved once at initialization, so reading it can neither fail nor trap.
+    public let baseURL: URL
 
     /// Initializes a new ProtectService instance
     ///
     /// - Parameters:
-    ///   - host: The hostname or IP address of the UniFi Protect controller
+    ///   - host: The hostname or IP address of the UniFi Protect controller, optionally with a
+    ///     port (`10.0.0.1:7443`). Supply the host alone — a scheme, path, or query makes it
+    ///     invalid.
     ///   - apiKey: The API key for authentication
-    public init(host: String, apiKey: String) {
-        self.host = host
+    ///   - allowsSelfSignedCertificate: Whether to accept the self-signed certificate served by
+    ///     the console at `host`. Defaults to `true`, which is what a UniFi console on a LAN
+    ///     requires; pass `false` to demand a fully-trusted certificate chain. See
+    ///     ``SelfSignedTrustDelegate`` for exactly how far the exception reaches.
+    /// - Throws: ``ProtectError/invalidHost(_:)`` if `host` cannot form a valid URL.
+    public init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true) throws {
+        guard let components = URLComponents(string: "https://\(host)\(Self.apiPath)"),
+            let resolvedHost = components.host, !resolvedHost.isEmpty,
+            components.path == Self.apiPath,
+            components.query == nil, components.fragment == nil, components.user == nil,
+            let url = components.url
+        else {
+            throw ProtectError.invalidHost(host)
+        }
+
         self.apiKey = apiKey
+        self.baseURL = url
+        self.session =
+            allowsSelfSignedCertificate
+            ? URLSession(
+                configuration: .default,
+                delegate: SelfSignedTrustDelegate(trustedHost: resolvedHost),
+                delegateQueue: nil)
+            : URLSession(configuration: .default)
+    }
+
+    /// Releases the session, and with it the delegate the session holds.
+    ///
+    /// A `URLSession` created with a delegate retains that delegate until the session is
+    /// invalidated, so letting the service go out of scope without this leaks both.
+    deinit {
+        session.finishTasksAndInvalidate()
     }
 
     /// Retrieves all cameras from the Protect system
@@ -108,7 +205,7 @@ public class ProtectService {
                 ])
         }
 
-        let url = base_url.appendingPathComponent("/cameras/\(cameraId)/snapshot")
+        let url = baseURL.appendingPathComponent("/cameras/\(cameraId)/snapshot")
         return try await request(url: url)
     }
 
@@ -163,7 +260,7 @@ public class ProtectService {
         method: String? = nil, body: Data? = nil, accepting mimetype: MIMEType? = .json
     ) async throws -> Data {
         let requestId = "Req " + String(UUID().uuidString.prefix(6))
-        let resolvedURL = url ?? (path.map { base_url.appendingPathComponent($0) })!
+        let resolvedURL = url ?? (path.map { baseURL.appendingPathComponent($0) })!
         logger.debug("[\(requestId, privacy: .public)] Preparing: \(resolvedURL, privacy: .public)")
 
         var request = URLRequest(url: resolvedURL)
@@ -192,7 +289,7 @@ public class ProtectService {
             "[\(requestId, privacy: .public)] Sending request to \(request.url?.absoluteString ?? "unknown URL", privacy: .public)"
         )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
