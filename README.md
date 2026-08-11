@@ -48,9 +48,25 @@ targets: [
 ```swift
 import Protect
 
-let service = ProtectService(
+let service = try ProtectService(
     host: "192.168.1.100",  // Your Unifi Protect console IP/hostname
     apiKey: "your-api-key"   // API key from Unifi Protect
+)
+```
+
+The initializer throws `ProtectError.invalidHost` if `host` can't form a valid URL, so a
+typo is rejected at construction rather than crashing on the first request. Pass the host
+alone — a scheme, path, or query makes it invalid. A port is fine (`10.0.0.1:7443`).
+
+Traffic uses HTTPS, and by default the certificate the console at `host` presents is accepted
+even when self-signed, which is what a UniFi console on a LAN requires. To demand a
+fully-trusted certificate chain instead:
+
+```swift
+let service = try ProtectService(
+    host: "protect.example.com",
+    apiKey: "your-api-key",
+    allowsSelfSignedCertificate: false
 )
 ```
 
@@ -138,8 +154,13 @@ for camera in cameras {
 
 The main service class for interacting with the Unifi Protect API.
 
+#### Properties
+
+- `baseURL: URL` - The resolved API endpoint, e.g. `https://192.168.1.100/proxy/protect/integration/v1`
+
 #### Methods
 
+- `init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true) throws` - Create a service, validating `host`
 - `cameras() async throws -> [Camera]` - Fetch all cameras (cached after first call)
 - `liveviews() async throws -> [Liveview]` - Fetch all liveviews (cached)
 - `viewports() async throws -> [Viewport]` - Fetch all viewports (cached)
@@ -220,10 +241,11 @@ The service automatically caches API responses for cameras, liveviews, and viewp
 Protect uses the Unifi Protect Integration API v1:
 
 ```
-http://{host}/proxy/protect/integration/v1
+https://{host}/proxy/protect/integration/v1
 ```
 
-All requests include authentication via the `X-API-KEY` header.
+All requests include authentication via the `X-API-KEY` header, which is why the transport is
+TLS: on plain HTTP that header crosses the network in cleartext.
 
 ### Logging
 
@@ -232,7 +254,8 @@ The package uses `OSLog` for structured logging. You can monitor API requests an
 ## Error Handling
 
 The service throws errors for:
-- Network failures
+- An invalid host at initialization (`ProtectError.invalidHost`)
+- Network failures, including TLS trust failures when `allowsSelfSignedCertificate` is `false`
 - Invalid API responses (non-200 status codes)
 - JSON decoding failures
 - Missing resources (e.g., camera not found)

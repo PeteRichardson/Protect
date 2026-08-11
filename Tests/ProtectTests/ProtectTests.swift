@@ -284,24 +284,59 @@ func testViewportDescription() {
 // MARK: - ProtectService Tests
 
 @Test("ProtectService initializes with host and API key")
-func testServiceInitialization() {
-    let service = ProtectService(host: "192.168.1.100", apiKey: "test-key")
+func testServiceInitialization() throws {
+    let service = try ProtectService(host: "192.168.1.100", apiKey: "test-key")
 
-    #expect(service.base_url.absoluteString == "http://192.168.1.100/proxy/protect/integration/v1")
+    #expect(service.baseURL.absoluteString == "https://192.168.1.100/proxy/protect/integration/v1")
 }
 
 @Test("ProtectService constructs correct base URL")
-func testBaseURLConstruction() {
-    let service1 = ProtectService(host: "protect.local", apiKey: "key1")
-    let service2 = ProtectService(host: "10.0.0.1:7443", apiKey: "key2")
+func testBaseURLConstruction() throws {
+    let service1 = try ProtectService(host: "protect.local", apiKey: "key1")
+    let service2 = try ProtectService(host: "10.0.0.1:7443", apiKey: "key2")
 
-    #expect(service1.base_url.absoluteString == "http://protect.local/proxy/protect/integration/v1")
-    #expect(service2.base_url.absoluteString == "http://10.0.0.1:7443/proxy/protect/integration/v1")
+    #expect(service1.baseURL.absoluteString == "https://protect.local/proxy/protect/integration/v1")
+    #expect(service2.baseURL.absoluteString == "https://10.0.0.1:7443/proxy/protect/integration/v1")
+}
+
+@Test("ProtectService always uses TLS")
+func testBaseURLUsesTLS() throws {
+    let service = try ProtectService(host: "192.168.1.100", apiKey: "test-key")
+
+    #expect(service.baseURL.scheme == "https")
+}
+
+@Test("A host containing a space is rejected at construction")
+func testHostWithSpaceIsRejected() {
+    #expect(throws: ProtectError.invalidHost("my console")) {
+        _ = try ProtectService(host: "my console", apiKey: "key")
+    }
+}
+
+@Test("An empty host is rejected at construction")
+func testEmptyHostIsRejected() {
+    #expect(throws: ProtectError.invalidHost("")) {
+        _ = try ProtectService(host: "", apiKey: "key")
+    }
+}
+
+@Test("A host carrying its own scheme is rejected at construction")
+func testHostWithSchemeIsRejected() {
+    #expect(throws: ProtectError.invalidHost("http://192.168.1.100")) {
+        _ = try ProtectService(host: "http://192.168.1.100", apiKey: "key")
+    }
+}
+
+@Test("invalidHost error names the offending host")
+func testInvalidHostErrorIsDescriptive() {
+    let error = ProtectError.invalidHost("bad host")
+
+    #expect(error.errorDescription?.contains("bad host") == true)
 }
 
 @Test("Lookup camera ID returns nil for nonexistent camera")
 func testLookupCameraNotFound() async throws {
-    let service = MockProtectService(host: "test.local", apiKey: "key")
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
 
     let mockCameras = [
         Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off"),
@@ -316,7 +351,7 @@ func testLookupCameraNotFound() async throws {
 
 @Test("Lookup camera ID is case insensitive")
 func testLookupCameraCaseInsensitive() async throws {
-    let service = MockProtectService(host: "test.local", apiKey: "key")
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
 
     let mockCameras = [
         Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off")
@@ -334,7 +369,7 @@ func testLookupCameraCaseInsensitive() async throws {
 
 @Test("Lookup liveview name by ID")
 func testLookupLiveviewName() async throws {
-    let service = MockProtectService(host: "test.local", apiKey: "key")
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
 
     let mockLiveviews = [
         Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 4, slots: []),
@@ -353,7 +388,7 @@ func testLookupLiveviewName() async throws {
 
 @Test("Lookup viewport ID by name is case insensitive")
 func testLookupViewportCaseInsensitive() async throws {
-    let service = MockProtectService(host: "test.local", apiKey: "key")
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
 
     let mockViewports = [
         Viewport(id: "vp1", liveview: "lv1", name: "Living Room", state: "ACTIVE", streamLimit: 4)
