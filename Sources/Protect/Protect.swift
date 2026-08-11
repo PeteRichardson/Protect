@@ -34,6 +34,16 @@ public enum ProtectError: Error, Equatable, LocalizedError {
     /// The associated value is the name that was searched for. Matching is case-insensitive.
     case cameraNotFound(String)
 
+    /// No viewport on the console matched the requested name.
+    ///
+    /// The associated value is the name that was searched for. Matching is case-insensitive.
+    case viewportNotFound(String)
+
+    /// No liveview on the console matched the requested name.
+    ///
+    /// The associated value is the name that was searched for. Matching is case-insensitive.
+    case liveviewNotFound(String)
+
     /// The console answered with a non-2xx status.
     ///
     /// `body` carries the server's response body, truncated, when it sent one — the Protect
@@ -54,6 +64,10 @@ public enum ProtectError: Error, Equatable, LocalizedError {
                 """
         case .cameraNotFound(let name):
             return "No camera named '\(name)' was found on this console."
+        case .viewportNotFound(let name):
+            return "No viewport named '\(name)' was found on this console."
+        case .liveviewNotFound(let name):
+            return "No liveview named '\(name)' was found on this console."
         case .httpStatus(let code, let body):
             let status = HTTPURLResponse.localizedString(forStatusCode: code)
             let base = "The console returned HTTP \(code) (\(status))."
@@ -231,8 +245,29 @@ public class ProtectService {
             throw ProtectError.cameraNotFound(camera)
         }
 
-        let url = baseURL.appendingPathComponent("/cameras/\(cameraId)/snapshot")
+        let url = Self.snapshotURL(base: baseURL, cameraId: cameraId, highQuality: quality)
         return try await request(url: url)
+    }
+
+    /// Builds the snapshot endpoint URL for a camera.
+    ///
+    /// `highQuality=true` is appended only when requested, so a standard-quality call produces
+    /// exactly the URL it always has. The parameter name is the one the Protect integration
+    /// API defines for `GET /v1/cameras/{id}/snapshot`.
+    ///
+    /// - Parameters:
+    ///   - base: The service's ``ProtectService/baseURL``.
+    ///   - cameraId: The opaque camera ID, already resolved from a name.
+    ///   - highQuality: Whether to ask the console for a full-resolution still.
+    /// - Returns: The snapshot URL, with the query appended when `highQuality` is `true`.
+    static func snapshotURL(base: URL, cameraId: String, highQuality: Bool) -> URL {
+        let url = base.appendingPathComponent("cameras/\(cameraId)/snapshot")
+        guard highQuality else { return url }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        components.queryItems = [URLQueryItem(name: "highQuality", value: "true")]
+        return components.url ?? url
     }
 
     /// Changes the liveview displayed on a viewport
@@ -241,6 +276,33 @@ public class ProtectService {
     ///   - viewportId: The ID of the viewport to update
     ///   - liveviewId: The ID of the liveview to display on the viewport
     /// - Throws: An error if the API request fails
+    /// Changes the liveview displayed on a viewport, addressing both by name
+    ///
+    /// The name-based counterpart to ``changeViewportView(on:to:)``. Every other public entry
+    /// point takes human names — ``getSnapshot(from:with:)`` resolves a camera name
+    /// internally — so this overload exists to let a caller stay in one addressing scheme
+    /// rather than reaching for the lookup helpers between calls.
+    ///
+    /// Both names are resolved before any request is sent, so an unknown name fails without
+    /// touching the console.
+    ///
+    /// - Parameters:
+    ///   - viewportName: The name of the viewport to update. Matched case-insensitively.
+    ///   - liveviewName: The name of the liveview to display. Matched case-insensitively.
+    /// - Throws: ``ProtectError/viewportNotFound(_:)`` or ``ProtectError/liveviewNotFound(_:)``
+    ///   if either name has no match, or any error the underlying request raises.
+    public func changeViewportView(
+        onViewportNamed viewportName: String, toLiveviewNamed liveviewName: String
+    ) async throws {
+        guard let viewportId = try await lookupViewportId(byName: viewportName) else {
+            throw ProtectError.viewportNotFound(viewportName)
+        }
+        guard let liveviewId = try await lookupLiveviewId(byName: liveviewName) else {
+            throw ProtectError.liveviewNotFound(liveviewName)
+        }
+        try await changeViewportView(on: viewportId, to: liveviewId)
+    }
+
     public func changeViewportView(on viewportId: String, to liveviewId: String) async throws {
         let body = ["liveview": liveviewId]
         let requestBody = try JSONEncoder().encode(body)
@@ -370,9 +432,24 @@ public class ProtectService {
     /// - Parameter id: The liveview ID to search for
     /// - Returns: The name of the liveview, or nil if not found
     /// - Throws: An error if fetching liveviews fails
-    func lookupLiveviewName(byId id: String) async throws -> String? {
+    public func lookupLiveviewName(byId id: String) async throws -> String? {
         logger.debug("\tGetting liveview name for \(id, privacy: .public)")
         return try await liveviews().first(where: { $0.id == id })?.name
+    }
+
+    /// Looks up a liveview ID by its name (case-insensitive)
+    ///
+    /// The inverse of ``lookupLiveviewName(byId:)``, and the one direction the package
+    /// previously had no way to travel — which is why addressing a viewport change by name
+    /// was impossible from outside.
+    ///
+    /// - Parameter name: The liveview name to search for
+    /// - Returns: The ID of the liveview, or nil if not found
+    /// - Throws: An error if fetching liveviews fails
+    public func lookupLiveviewId(byName name: String) async throws -> String? {
+        logger.debug("\tGetting liveview id for \(name, privacy: .public)")
+        return try await liveviews().first(where: { $0.name.lowercased() == name.lowercased() })?
+            .id
     }
 
     /// Looks up a camera ID by its name (case-insensitive)
@@ -380,7 +457,7 @@ public class ProtectService {
     /// - Parameter name: The camera name to search for
     /// - Returns: The ID of the camera, or nil if not found
     /// - Throws: An error if fetching cameras fails
-    func lookupCameraId(byName name: String) async throws -> String? {
+    public func lookupCameraId(byName name: String) async throws -> String? {
         logger.debug("\tGetting camera id for \(name, privacy: .public)")
         return try await cameras().first(where: { $0.name.lowercased() == name.lowercased() })?.id
     }
@@ -390,7 +467,7 @@ public class ProtectService {
     /// - Parameter name: The viewport name to search for
     /// - Returns: The ID of the viewport, or nil if not found
     /// - Throws: An error if fetching viewports fails
-    func lookupViewportId(byName name: String) async throws -> String? {
+    public func lookupViewportId(byName name: String) async throws -> String? {
         logger.debug("\tGetting viewport id for \(name, privacy: .public)")
         return try await viewports().first(where: { $0.name.lowercased() == name.lowercased() })?.id
     }
