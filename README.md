@@ -253,18 +253,34 @@ The package uses `OSLog` for structured logging. You can monitor API requests an
 
 ## Error Handling
 
-The service throws errors for:
-- An invalid host at initialization (`ProtectError.invalidHost`)
-- Network failures, including TLS trust failures when `allowsSelfSignedCertificate` is `false`
-- Invalid API responses (non-200 status codes)
-- JSON decoding failures
-- Missing resources (e.g., camera not found)
+Everything this package originates is a `ProtectError`, so failures are distinguished by
+pattern matching rather than by status codes on an `NSError`:
 
-Example error handling:
+```swift
+public enum ProtectError: Error, Equatable, LocalizedError {
+    case invalidHost(String)              // bad host at initialization
+    case cameraNotFound(String)           // no camera matched that name
+    case httpStatus(Int, body: String?)   // non-2xx, with the server's explanation
+    case invalidResponse                  // reply wasn't an HTTP response
+}
+```
+
+`httpStatus` carries the console's response body (truncated to 1 KB) when it sent one. The
+Protect API returns a JSON payload explaining *why* a request failed, and it is usually far
+more specific than the status code — a `401` body distinguishes an expired API key from one
+that was never valid.
+
+Failures originating below this package still surface as their own types: `URLSession` raises
+`URLError` for an unreachable host, a TLS trust failure, or a cancelled task, and `cameras()`
+and friends rethrow `DecodingError` when the console's JSON doesn't match the model.
 
 ```swift
 do {
     let cameras = try await service.cameras()
+} catch ProtectError.httpStatus(401, let body) {
+    print("Check the API key: \(body ?? "no detail")")
+} catch let error as ProtectError {
+    print("Protect rejected the request: \(error.localizedDescription)")
 } catch {
     print("Failed to fetch cameras: \(error)")
 }

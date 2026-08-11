@@ -334,6 +334,84 @@ func testInvalidHostErrorIsDescriptive() {
     #expect(error.errorDescription?.contains("bad host") == true)
 }
 
+// MARK: - ProtectError Tests
+
+@Test("getSnapshot throws cameraNotFound for an unknown camera")
+func testGetSnapshotThrowsCameraNotFound() async throws {
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
+    service.mockCameras = [
+        Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off")
+    ]
+
+    await #expect(throws: ProtectError.cameraNotFound("Back Yard")) {
+        _ = try await service.getSnapshot(from: "Back Yard", with: false)
+    }
+}
+
+@Test("cameraNotFound error names the camera")
+func testCameraNotFoundIsDescriptive() {
+    let error = ProtectError.cameraNotFound("Front Door")
+
+    #expect(error.errorDescription?.contains("Front Door") == true)
+}
+
+@Test("httpStatus error reports the code and the server's body")
+func testHTTPStatusIncludesBody() throws {
+    let error = ProtectError.httpStatus(404, body: "{\"error\":\"camera not found\"}")
+
+    let description = try #require(error.errorDescription)
+    #expect(description.contains("404"))
+    #expect(description.contains("camera not found"))
+}
+
+@Test("httpStatus error without a body omits it rather than printing nil")
+func testHTTPStatusWithoutBody() throws {
+    let error = ProtectError.httpStatus(500, body: nil)
+
+    let description = try #require(error.errorDescription)
+    #expect(description.contains("500"))
+    #expect(!description.lowercased().contains("nil"))
+}
+
+@Test("invalidResponse error has a description")
+func testInvalidResponseIsDescriptive() {
+    let error = ProtectError.invalidResponse
+
+    #expect(error.errorDescription?.isEmpty == false)
+}
+
+// MARK: - Error Body Rendering Tests
+
+@Test("An empty response body renders as no body at all")
+func testErrorBodyEmptyIsNil() {
+    #expect(ProtectService.errorBody(from: Data()) == nil)
+}
+
+@Test("A whitespace-only response body renders as no body at all")
+func testErrorBodyWhitespaceIsNil() {
+    let data = Data("   \n\t  ".utf8)
+
+    #expect(ProtectService.errorBody(from: data) == nil)
+}
+
+@Test("A short response body is returned verbatim")
+func testErrorBodyShortIsVerbatim() {
+    let data = Data("{\"error\":\"nope\"}".utf8)
+
+    #expect(ProtectService.errorBody(from: data) == "{\"error\":\"nope\"}")
+}
+
+@Test("An oversized response body is truncated and marked as truncated")
+func testErrorBodyLongIsTruncated() throws {
+    let data = Data(String(repeating: "x", count: 40).utf8)
+
+    let rendered = try #require(ProtectService.errorBody(from: data, limit: 10))
+
+    #expect(rendered.hasPrefix(String(repeating: "x", count: 10)))
+    #expect(rendered.count < 40)
+    #expect(rendered.lowercased().contains("truncated"))
+}
+
 @Test("Lookup camera ID returns nil for nonexistent camera")
 func testLookupCameraNotFound() async throws {
     let service = try MockProtectService(host: "test.local", apiKey: "key")
