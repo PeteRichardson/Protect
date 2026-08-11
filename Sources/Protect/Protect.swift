@@ -233,9 +233,30 @@ public class ProtectService {
 
     /// Retrieves a snapshot image from a camera
     ///
+    /// ## On `quality`
+    ///
+    /// Passing `true` appends `highQuality=true`, which asks the console for a full-HD-or-better
+    /// still. **Not every camera supports it, and the ones that don't reject the request rather
+    /// than falling back.** Verified against a live console:
+    ///
+    /// | Camera | `quality: true` |
+    /// |---|---|
+    /// | 4MP camera (2688×1512 default) | succeeds |
+    /// | Doorbell (1920×2560 default) | succeeds, but identical dimensions — already above full HD |
+    /// | G6 180 ultra-wide (1280×360 default) | **HTTP 400**, `Camera does not support full HD snapshot` |
+    ///
+    /// So `quality: true` is not a safe default: on an unsupported camera it throws
+    /// ``ProtectError/httpStatus(_:body:)`` with `400` and that message in `body`, and you get
+    /// no image at all. A caller that wants a best-effort snapshot should either pass `false`
+    /// or catch the 400 and retry without it.
+    ///
+    /// Passing `false` sends no query parameter at all, so the standard path is exactly the
+    /// request this package has always made and cannot regress.
+    ///
     /// - Parameters:
     ///   - camera: The name of the camera to get a snapshot from
-    ///   - quality: If true, requests a high-quality snapshot
+    ///   - quality: If true, requests a full-HD-or-better snapshot. See the note above — this
+    ///     fails outright on cameras that don't support it.
     /// - Returns: The snapshot image data in JPEG format
     /// - Throws: ``ProtectError/cameraNotFound(_:)`` if no camera matches `camera`, or any
     ///   error the underlying request raises.
@@ -253,7 +274,9 @@ public class ProtectService {
     ///
     /// `highQuality=true` is appended only when requested, so a standard-quality call produces
     /// exactly the URL it always has. The parameter name is the one the Protect integration
-    /// API defines for `GET /v1/cameras/{id}/snapshot`.
+    /// API defines for `GET /v1/cameras/{id}/snapshot`, confirmed against a live console — an
+    /// unsupported camera answers `400 BAD_REQUEST` with `Camera does not support full HD
+    /// snapshot`, which is not how a server responds to a query parameter it doesn't know.
     ///
     /// - Parameters:
     ///   - base: The service's ``ProtectService/baseURL``.

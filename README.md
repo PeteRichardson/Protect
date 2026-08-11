@@ -85,12 +85,28 @@ for camera in cameras {
 ```swift
 let snapshotData = try await service.getSnapshot(
     from: "Front Door",
-    with: true  // high quality — appends `highQuality=true` to the request
+    with: true  // full HD or better — appends `highQuality=true`
 )
 
 // Save snapshot to file
 try snapshotData.write(to: URL(fileURLWithPath: "snapshot.jpg"))
 ```
+
+> **`with: true` is not a safe default.** Cameras that can't produce a full-HD still reject the
+> request outright instead of falling back — a UniFi G6 180, whose snapshots are 1280×360,
+> answers `400` with `Camera does not support full HD snapshot` and returns no image. Cameras
+> already above full HD (a doorbell at 1920×2560) accept it and return the same dimensions
+> they would have anyway. Pass `false` for a best-effort snapshot that works everywhere, or
+> catch `ProtectError.httpStatus(400, _)` and retry without it:
+>
+> ```swift
+> let data: Data
+> do {
+>     data = try await service.getSnapshot(from: "Driveway", with: true)
+> } catch ProtectError.httpStatus(400, _) {
+>     data = try await service.getSnapshot(from: "Driveway", with: false)
+> }
+> ```
 
 ### Manage Liveviews
 
