@@ -85,7 +85,7 @@ for camera in cameras {
 ```swift
 let snapshotData = try await service.getSnapshot(
     from: "Front Door",
-    with: true  // high quality
+    with: true  // high quality — appends `highQuality=true` to the request
 )
 
 // Save snapshot to file
@@ -108,12 +108,21 @@ for liveview in liveviews {
 // Get all viewports
 let viewports = try await service.viewports()
 
-// Change what a viewport is displaying
+// Change what a viewport is displaying, by name
+try await service.changeViewportView(
+    onViewportNamed: "Kitchen Display",
+    toLiveviewNamed: "All Cameras"
+)
+
+// Or by raw ID, if you already have them
 try await service.changeViewportView(
     on: "viewport-id",
     to: "liveview-id"
 )
 ```
+
+Both names are resolved before any request is sent, so an unknown name throws
+`ProtectError.viewportNotFound` or `.liveviewNotFound` without touching the console.
 
 ### Lookup by Name
 
@@ -126,6 +135,11 @@ if let cameraId = try await service.lookupCameraId(byName: "front door") {
 // Find liveview name by ID
 if let liveviewName = try await service.lookupLiveviewName(byId: "lv123") {
     print("Liveview: \(liveviewName)")
+}
+
+// ...and the other direction
+if let liveviewId = try await service.lookupLiveviewId(byName: "All Cameras") {
+    print("Liveview ID: \(liveviewId)")
 }
 
 // Find viewport ID by name
@@ -164,11 +178,16 @@ The main service class for interacting with the Unifi Protect API.
 - `cameras() async throws -> [Camera]` - Fetch all cameras (cached after first call)
 - `liveviews() async throws -> [Liveview]` - Fetch all liveviews (cached)
 - `viewports() async throws -> [Viewport]` - Fetch all viewports (cached)
-- `getSnapshot(from: String, with: Bool) async throws -> Data` - Get camera snapshot
-- `changeViewportView(on: String, to: String) async throws` - Change viewport display
+- `getSnapshot(from: String, with: Bool) async throws -> Data` - Get camera snapshot; `with: true` requests full resolution
+- `changeViewportView(onViewportNamed: String, toLiveviewNamed: String) async throws` - Change viewport display, by name
+- `changeViewportView(on: String, to: String) async throws` - Change viewport display, by raw ID
 - `lookupCameraId(byName: String) async throws -> String?` - Find camera ID by name
+- `lookupLiveviewId(byName: String) async throws -> String?` - Find liveview ID by name
 - `lookupLiveviewName(byId: String) async throws -> String?` - Find liveview name by ID
 - `lookupViewportId(byName: String) async throws -> String?` - Find viewport ID by name
+
+All four lookups are `public`. Name matching is case-insensitive throughout, and each returns
+`nil` rather than throwing when there's no match.
 
 ### Data Models
 

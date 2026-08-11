@@ -380,6 +380,92 @@ func testInvalidResponseIsDescriptive() {
     #expect(error.errorDescription?.isEmpty == false)
 }
 
+// MARK: - Snapshot URL Tests
+
+@Test("A standard-quality snapshot URL carries no query")
+func testSnapshotURLStandardQuality() throws {
+    let base = try #require(URL(string: "https://192.168.1.100/proxy/protect/integration/v1"))
+
+    let url = ProtectService.snapshotURL(base: base, cameraId: "cam1", highQuality: false)
+
+    #expect(
+        url.absoluteString
+            == "https://192.168.1.100/proxy/protect/integration/v1/cameras/cam1/snapshot")
+}
+
+@Test("A high-quality snapshot URL carries highQuality=true")
+func testSnapshotURLHighQuality() throws {
+    let base = try #require(URL(string: "https://192.168.1.100/proxy/protect/integration/v1"))
+
+    let url = ProtectService.snapshotURL(base: base, cameraId: "cam1", highQuality: true)
+
+    #expect(
+        url.absoluteString
+            == "https://192.168.1.100/proxy/protect/integration/v1/cameras/cam1/snapshot?highQuality=true"
+    )
+}
+
+// MARK: - Name-Based Addressing Tests
+
+@Test("Lookup liveview ID by name is case insensitive")
+func testLookupLiveviewIdByName() async throws {
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
+    service.mockLiveviews = [
+        Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 1, slots: [])
+    ]
+
+    let result = try await service.lookupLiveviewId(byName: "main view")
+
+    #expect(result == "lv1")
+}
+
+@Test("Lookup liveview ID returns nil for an unknown name")
+func testLookupLiveviewIdNotFound() async throws {
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
+    service.mockLiveviews = []
+
+    let result = try await service.lookupLiveviewId(byName: "Nope")
+
+    #expect(result == nil)
+}
+
+@Test("Changing a viewport by name rejects an unknown viewport before any request")
+func testChangeViewportByNameUnknownViewport() async throws {
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
+    service.mockViewports = []
+    service.mockLiveviews = [
+        Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 1, slots: [])
+    ]
+
+    await #expect(throws: ProtectError.viewportNotFound("Kitchen")) {
+        try await service.changeViewportView(
+            onViewportNamed: "Kitchen", toLiveviewNamed: "Main View")
+    }
+}
+
+@Test("Changing a viewport by name rejects an unknown liveview before any request")
+func testChangeViewportByNameUnknownLiveview() async throws {
+    let service = try MockProtectService(host: "test.local", apiKey: "key")
+    service.mockViewports = [
+        Viewport(id: "vp1", liveview: "lv1", name: "Kitchen", state: "ACTIVE", streamLimit: 4)
+    ]
+    service.mockLiveviews = []
+
+    await #expect(throws: ProtectError.liveviewNotFound("Main View")) {
+        try await service.changeViewportView(
+            onViewportNamed: "Kitchen", toLiveviewNamed: "Main View")
+    }
+}
+
+@Test("viewportNotFound and liveviewNotFound name what was missing")
+func testNotFoundErrorsAreDescriptive() throws {
+    let viewport = try #require(ProtectError.viewportNotFound("Kitchen").errorDescription)
+    let liveview = try #require(ProtectError.liveviewNotFound("Main View").errorDescription)
+
+    #expect(viewport.contains("Kitchen"))
+    #expect(liveview.contains("Main View"))
+}
+
 // MARK: - Error Body Rendering Tests
 
 @Test("An empty response body renders as no body at all")
