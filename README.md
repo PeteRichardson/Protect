@@ -188,10 +188,11 @@ The main service type for interacting with the Unifi Protect API. An `actor` —
 #### Properties
 
 - `baseURL: URL` - The resolved API endpoint, e.g. `https://192.168.1.100/proxy/protect/integration/v1`
+- `static defaultTimeout: TimeInterval` - 15 seconds, used when no `timeout` is supplied
 
 #### Methods
 
-- `init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true, session: URLSession? = nil) throws` - Create a service, validating `host`; pass `session` to stub the transport in tests
+- `init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true, session: URLSession? = nil, timeout: TimeInterval = ProtectService.defaultTimeout) throws` - Create a service, validating `host`; pass `session` to stub the transport in tests
 - `cameras() async throws -> [Camera]` - Fetch all cameras (cached after first call)
 - `liveviews() async throws -> [Liveview]` - Fetch all liveviews (cached)
 - `viewports() async throws -> [Viewport]` - Fetch all viewports (cached)
@@ -275,6 +276,18 @@ installed on a `URLSession` that tests pass to
 point available to you if you need to stub Protect in your own tests.
 
 ## How It Works
+
+### Timeouts
+
+Requests time out after **15 seconds** by default, not `URLSession`'s 60. A console on the
+same network answers in well under a second, so a minute-long freeze almost always means the
+console is off or the host is a typo — and a minute is a long time for an app to look hung.
+
+```swift
+let service = try ProtectService(host: "192.168.1.100", apiKey: key, timeout: 5)
+```
+
+Raise it if you fetch full-resolution snapshots from a busy console.
 
 ### Concurrency
 
