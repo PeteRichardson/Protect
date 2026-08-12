@@ -402,6 +402,36 @@ func testSnapshotURLHighQuality() throws {
     )
 }
 
+// MARK: - Endpoint and HTTPMethod Tests
+
+@Test("A path endpoint resolves relative to the base URL")
+func testEndpointPathResolves() throws {
+    let base = try #require(URL(string: "https://192.168.1.100/proxy/protect/integration/v1"))
+
+    let resolved = Endpoint.path("cameras").resolve(against: base)
+
+    #expect(
+        resolved.absoluteString
+            == "https://192.168.1.100/proxy/protect/integration/v1/cameras")
+}
+
+@Test("A url endpoint resolves to itself, ignoring the base URL")
+func testEndpointURLResolvesVerbatim() throws {
+    let base = try #require(URL(string: "https://192.168.1.100/proxy/protect/integration/v1"))
+    let absolute = try #require(URL(string: "https://elsewhere.example/snapshot?highQuality=true"))
+
+    let resolved = Endpoint.url(absolute).resolve(against: base)
+
+    #expect(resolved == absolute)
+}
+
+@Test("HTTP methods render as the uppercase verbs the API expects")
+func testHTTPMethodRawValues() {
+    #expect(HTTPMethod.get.rawValue == "GET")
+    #expect(HTTPMethod.patch.rawValue == "PATCH")
+    #expect(HTTPMethod.post.rawValue == "POST")
+}
+
 // MARK: - Error Body Rendering Tests
 
 @Test("An empty response body renders as no body at all")
@@ -508,6 +538,70 @@ struct NetworkingTests {
 
         let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
         #expect(recorded.headers["X-API-KEY"] == "test-key")
+    }
+
+    @Test("Custom headers merge over the defaults instead of replacing them")
+    func testCustomHeadersDoNotDropAuth() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        _ = try await service.request(
+            .path("cameras"), headers: ["X-Trace-Id": "abc123"])
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        // The point of the fix: a caller-supplied header must not evict authentication.
+        #expect(recorded.headers["X-API-KEY"] == "test-key")
+        #expect(recorded.headers["X-Trace-Id"] == "abc123")
+    }
+
+    @Test("A caller may deliberately override a default header")
+    func testCustomHeaderCanOverrideADefault() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        _ = try await service.request(
+            .path("cameras"), headers: ["Accept": "text/plain"])
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        #expect(recorded.headers["Accept"] == "text/plain")
+        #expect(recorded.headers["X-API-KEY"] == "test-key")
+    }
+
+    @Test("The Accept header carries the requested MIME type")
+    func testAcceptHeaderReflectsMIMEType() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        _ = try await service.request(.path("cameras"), accepting: .jpeg)
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        #expect(recorded.headers["Accept"] == MIMEType.jpeg.rawValue)
+        #expect(recorded.headers["Content-Type"] == MIMEType.json.rawValue)
+    }
+
+    @Test("Requests carry the configured timeout, not URLSession's 60s default")
+    func testRequestUsesConfiguredTimeout() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try ProtectService(
+            host: "test.local", apiKey: "test-key",
+            session: StubURLProtocol.makeSession(), timeout: 3)
+
+        _ = try await service.cameras()
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        #expect(recorded.timeout == 3)
+    }
+
+    @Test("The default timeout is well under URLSession's 60 seconds")
+    func testDefaultTimeoutIsShort() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        _ = try await service.cameras()
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        #expect(recorded.timeout == ProtectService.defaultTimeout)
+        #expect(recorded.timeout < 60)
     }
 
     @Test("Fetches are GETs against the versioned integration path")
@@ -810,6 +904,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         let query: String?
         let body: Data?
         let headers: [String: String]
+        let timeout: TimeInterval
     }
 
     private struct Response {
@@ -881,7 +976,8 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
                 path: path,
                 query: components?.query,
                 body: Self.bodyData(from: request),
-                headers: request.allHTTPHeaderFields ?? [:]))
+                headers: request.allHTTPHeaderFields ?? [:],
+                timeout: request.timeoutInterval))
         // Longest matching suffix wins, so "/viewers/vp1" is not shadowed by "/viewers".
         let match =
             Self.responses

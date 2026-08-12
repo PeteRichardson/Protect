@@ -17,6 +17,36 @@ enum MIMEType: String {
     case jpeg = "application/jpeg"
 }
 
+/// What a request is addressed to.
+///
+/// Replaces a pair of optional `path`/`url` parameters that permitted two nonsense states —
+/// both `nil`, which trapped on a force-unwrap, and both supplied, which silently ignored one.
+/// Neither is representable now.
+enum Endpoint {
+    /// A path relative to ``ProtectService/baseURL``, e.g. `"cameras"`.
+    case path(String)
+    /// A fully-formed URL, used where a query string has already been built.
+    case url(URL)
+
+    /// Resolves to the URL to request.
+    func resolve(against baseURL: URL) -> URL {
+        switch self {
+        case .path(let path): return baseURL.appendingPathComponent(path)
+        case .url(let url): return url
+        }
+    }
+}
+
+/// The HTTP methods this package issues.
+///
+/// Replaces a `method: String?` that defaulted to `nil` and meant GET — a spelling mistake
+/// away from a request that silently did the wrong thing.
+enum HTTPMethod: String {
+    case get = "GET"
+    case patch = "PATCH"
+    case post = "POST"
+}
+
 /// Errors thrown by `ProtectService`.
 ///
 /// Every failure the package originates is one of these cases, so a caller can distinguish
@@ -178,6 +208,17 @@ public actor ProtectService {
     /// The path the integration API is served under, appended to the host.
     private static let apiPath = "/proxy/protect/integration/v1"
 
+    /// How long a request may take before it fails, in seconds.
+    ///
+    /// `URLSession`'s own default is 60s, which is a very long time to stare at a frozen app
+    /// because a LAN appliance is switched off or the host is a typo. A console on the same
+    /// network answers in well under a second.
+    nonisolated let timeout: TimeInterval
+
+    /// The default request timeout: brisk enough to fail fast on a wrong host, long enough for
+    /// a busy console to render a full-resolution snapshot.
+    public static let defaultTimeout: TimeInterval = 15
+
     /// The base URL for the Protect API v1 integration endpoint
     ///
     /// Validated and resolved once at initialization, so reading it can neither fail nor trap.
@@ -205,10 +246,13 @@ public actor ProtectService {
     ///     service builds its own. Supply one to stub the transport — a configuration with
     ///     `protocolClasses` set is how the test suite exercises this package without a
     ///     network. An injected session is never invalidated by this service.
+    ///   - timeout: How long a request may take before failing, in seconds. Defaults to
+    ///     ``defaultTimeout`` (15s) rather than `URLSession`'s 60s, which is a long freeze when
+    ///     the console is off or the host is wrong.
     /// - Throws: ``ProtectError/invalidHost(_:)`` if `host` cannot form a valid URL.
     public init(
         host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true,
-        session: URLSession? = nil
+        session: URLSession? = nil, timeout: TimeInterval = ProtectService.defaultTimeout
     ) throws {
         guard let components = URLComponents(string: "https://\(host)\(Self.apiPath)"),
             let resolvedHost = components.host, !resolvedHost.isEmpty,
@@ -221,6 +265,7 @@ public actor ProtectService {
 
         self.apiKey = apiKey
         self.baseURL = url
+        self.timeout = timeout
         self.ownsSession = session == nil
         self.session =
             session
@@ -325,7 +370,7 @@ public actor ProtectService {
         }
 
         let url = Self.snapshotURL(base: baseURL, cameraId: cameraId, highQuality: quality)
-        return try await request(url: url)
+        return try await request(.url(url))
     }
 
     /// Builds the snapshot endpoint URL for a camera.
@@ -387,7 +432,8 @@ public actor ProtectService {
     public func changeViewportView(on viewportId: String, to liveviewId: String) async throws {
         let body = ["liveview": liveviewId]
         let requestBody = try JSONEncoder().encode(body)
-        _ = try await request(path: "/viewers/\(viewportId)", method: "PATCH", body: requestBody)
+        _ = try await request(
+            .path("viewers/\(viewportId)"), method: .patch, body: requestBody)
     }
 
     // MARK: - Helper Functions
@@ -411,7 +457,7 @@ public actor ProtectService {
     private func fetch<T: ProtectFetchable>() async throws -> [T] {
         logger.debug(
             "Loading \(T.urlSuffix, privacy: .public) data from server.  Should happen only once!")
-        let data = try await request(path: T.urlSuffix, accepting: .json)
+        let data = try await request(.path(T.urlSuffix), accepting: .json)
         return try T.parse(data)
     }
 
@@ -427,20 +473,24 @@ public actor ProtectService {
     /// - Returns: The response data from the API
     /// - Throws: An error if the request fails or returns a non-2xx status code
     func request(
-        path: String? = nil, url: URL? = nil, headers: [String: String]? = nil,
-        method: String? = nil, body: Data? = nil, accepting mimetype: MIMEType? = .json
+        _ endpoint: Endpoint, headers: [String: String]? = nil,
+        method: HTTPMethod = .get, body: Data? = nil, accepting mimetype: MIMEType = .json
     ) async throws -> Data {
         let requestId = "Req " + String(UUID().uuidString.prefix(6))
-        let resolvedURL = url ?? (path.map { baseURL.appendingPathComponent($0) })!
+        let resolvedURL = endpoint.resolve(against: baseURL)
         logger.debug("[\(requestId, privacy: .public)] Preparing: \(resolvedURL, privacy: .public)")
 
-        var request = URLRequest(url: resolvedURL)
-        let allHeaders =
-            headers ?? [
-                "X-API-KEY": apiKey,
-                "Content-Type": "application/json",
-                "Accept": mimetype?.rawValue ?? "application/json",
-            ]
+        var request = URLRequest(url: resolvedURL, timeoutInterval: timeout)
+
+        // Caller headers are merged *over* the defaults, never in place of them. The previous
+        // `headers ?? defaults` meant supplying any custom header silently dropped X-API-KEY,
+        // turning every request into a 401 for a reason nothing in the code named.
+        var allHeaders = [
+            "X-API-KEY": apiKey,
+            "Content-Type": MIMEType.json.rawValue,
+            "Accept": mimetype.rawValue,
+        ]
+        headers?.forEach { allHeaders[$0] = $1 }
 
         allHeaders.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
@@ -449,9 +499,7 @@ public actor ProtectService {
         logger.trace(
             "[\(requestId, privacy: .public)] Request header keys: \(request.allHTTPHeaderFields?.keys.sorted().joined(separator: ", ") ?? "", privacy: .public)"
         )
-        if let method = method {
-            request.httpMethod = method
-        }
+        request.httpMethod = method.rawValue
         if let body = body {
             request.httpBody = body
         }
