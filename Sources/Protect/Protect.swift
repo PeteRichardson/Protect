@@ -119,7 +119,7 @@ final class SelfSignedTrustDelegate: NSObject, URLSessionDelegate {
     }
 }
 
-/// Service class for interacting with the UniFi Protect API
+/// Actor for interacting with the UniFi Protect API
 ///
 /// `ProtectService` provides methods to fetch cameras, liveviews, and viewports from a UniFi Protect instance,
 /// retrieve camera snapshots, and manage viewport views. It implements caching for improved performance.
@@ -129,9 +129,25 @@ final class SelfSignedTrustDelegate: NSObject, URLSessionDelegate {
 /// let service = try ProtectService(host: "192.168.1.1", apiKey: "your-api-key")
 /// let cameras = try await service.cameras()
 /// ```
-public class ProtectService {
+///
+/// ## Concurrency
+///
+/// An `actor`, so one instance is safely shared across tasks — a Swift 6 client could not do
+/// that with the previous non-`Sendable` class. The whole public API was already
+/// `async throws`, so ordinary call sites are unchanged, and ``baseURL`` is declared
+/// `nonisolated` so it stays synchronously readable. (An actor's immutable `Sendable` `let`
+/// is *not* implicitly `nonisolated`; without the annotation, reading `baseURL` would require
+/// `await`.)
+///
+/// Actors are reentrant: two tasks calling ``cameras()`` concurrently on a cold cache can both
+/// find it empty and both fetch, and the second result overwrites the first. That is wasteful
+/// rather than incorrect — the values are identical, and the cache converges. Collapsing the
+/// duplicate fetch would mean storing an in-flight `Task` per resource, which belongs with the
+/// cache-invalidation work in #6 rather than here.
+public actor ProtectService {
     /// Logger instance for debugging and diagnostics
-    let logger = Logger(subsystem: "com.peterichardson.protect", category: "ProtectService")
+    nonisolated let logger = Logger(
+        subsystem: "com.peterichardson.protect", category: "ProtectService")
 
     /// Cache for camera data to avoid redundant API calls
     private var cachedCameras: [Camera]? = nil
@@ -149,8 +165,15 @@ public class ProtectService {
     /// The session all requests go through.
     ///
     /// An instance session rather than `URLSession.shared`, because only an instance session
-    /// can carry the delegate that accepts a UniFi console's self-signed certificate.
+    /// can carry the delegate that accepts a UniFi console's self-signed certificate — and
+    /// because a caller-supplied session is the seam tests stub `URLProtocol` through.
     private let session: URLSession
+
+    /// Whether this service created ``session`` and is therefore responsible for tearing it down.
+    ///
+    /// A caller-injected session may outlive this service and be shared with other code;
+    /// invalidating it in `deinit` would break its owner's next request.
+    private let ownsSession: Bool
 
     /// The path the integration API is served under, appended to the host.
     private static let apiPath = "/proxy/protect/integration/v1"
@@ -158,7 +181,13 @@ public class ProtectService {
     /// The base URL for the Protect API v1 integration endpoint
     ///
     /// Validated and resolved once at initialization, so reading it can neither fail nor trap.
-    public let baseURL: URL
+    ///
+    /// Explicitly `nonisolated` so it stays synchronously readable now that `ProtectService`
+    /// is an `actor`. It is an immutable `let` of a `Sendable` type, so this is safe — but the
+    /// compiler does not infer it, and without the annotation every `service.baseURL` becomes
+    /// `await service.baseURL`, which would be a gratuitous source break for a property this
+    /// package made public only one release ago.
+    nonisolated public let baseURL: URL
 
     /// Initializes a new ProtectService instance
     ///
@@ -170,9 +199,17 @@ public class ProtectService {
     ///   - allowsSelfSignedCertificate: Whether to accept the self-signed certificate served by
     ///     the console at `host`. Defaults to `true`, which is what a UniFi console on a LAN
     ///     requires; pass `false` to demand a fully-trusted certificate chain. See
-    ///     ``SelfSignedTrustDelegate`` for exactly how far the exception reaches.
+    ///     ``SelfSignedTrustDelegate`` for exactly how far the exception reaches. Ignored when
+    ///     `session` is supplied, since that session's own delegate governs trust.
+    ///   - session: The session to issue requests through. Defaults to `nil`, meaning the
+    ///     service builds its own. Supply one to stub the transport — a configuration with
+    ///     `protocolClasses` set is how the test suite exercises this package without a
+    ///     network. An injected session is never invalidated by this service.
     /// - Throws: ``ProtectError/invalidHost(_:)`` if `host` cannot form a valid URL.
-    public init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true) throws {
+    public init(
+        host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true,
+        session: URLSession? = nil
+    ) throws {
         guard let components = URLComponents(string: "https://\(host)\(Self.apiPath)"),
             let resolvedHost = components.host, !resolvedHost.isEmpty,
             components.path == Self.apiPath,
@@ -184,21 +221,24 @@ public class ProtectService {
 
         self.apiKey = apiKey
         self.baseURL = url
+        self.ownsSession = session == nil
         self.session =
-            allowsSelfSignedCertificate
-            ? URLSession(
-                configuration: .default,
-                delegate: SelfSignedTrustDelegate(trustedHost: resolvedHost),
-                delegateQueue: nil)
-            : URLSession(configuration: .default)
+            session
+            ?? (allowsSelfSignedCertificate
+                ? URLSession(
+                    configuration: .default,
+                    delegate: SelfSignedTrustDelegate(trustedHost: resolvedHost),
+                    delegateQueue: nil)
+                : URLSession(configuration: .default))
     }
 
     /// Releases the session, and with it the delegate the session holds.
     ///
     /// A `URLSession` created with a delegate retains that delegate until the session is
-    /// invalidated, so letting the service go out of scope without this leaks both.
+    /// invalidated, so letting the service go out of scope without this leaks both. Only a
+    /// session this service created is torn down; see ``ownsSession``.
     deinit {
-        session.finishTasksAndInvalidate()
+        if ownsSession { session.finishTasksAndInvalidate() }
     }
 
     /// Retrieves all cameras from the Protect system
@@ -208,7 +248,13 @@ public class ProtectService {
     /// - Returns: An array of `Camera` objects
     /// - Throws: An error if the API request fails
     public func cameras() async throws -> [Camera] {
-        try await fetchAndCache(cache: &cachedCameras)
+        if let cachedCameras {
+            logger.debug("Returning cached result for \(Camera.urlSuffix)")
+            return cachedCameras
+        }
+        let result: [Camera] = try await fetch()
+        cachedCameras = result
+        return result
     }
 
     /// Retrieves all liveviews from the Protect system
@@ -218,7 +264,13 @@ public class ProtectService {
     /// - Returns: An array of `Liveview` objects
     /// - Throws: An error if the API request fails
     public func liveviews() async throws -> [Liveview] {
-        try await fetchAndCache(cache: &cachedLiveviews)
+        if let cachedLiveviews {
+            logger.debug("Returning cached result for \(Liveview.urlSuffix)")
+            return cachedLiveviews
+        }
+        let result: [Liveview] = try await fetch()
+        cachedLiveviews = result
+        return result
     }
 
     /// Retrieves all viewports (viewers) from the Protect system
@@ -228,7 +280,13 @@ public class ProtectService {
     /// - Returns: An array of `Viewport` objects
     /// - Throws: An error if the API request fails
     public func viewports() async throws -> [Viewport] {
-        try await fetchAndCache(cache: &cachedViewports)
+        if let cachedViewports {
+            logger.debug("Returning cached result for \(Viewport.urlSuffix)")
+            return cachedViewports
+        }
+        let result: [Viewport] = try await fetch()
+        cachedViewports = result
+        return result
     }
 
     /// Retrieves a snapshot image from a camera
@@ -334,25 +392,27 @@ public class ProtectService {
 
     // MARK: - Helper Functions
 
-    /// Generic method to fetch and cache data from the Protect API
+    /// Fetches and decodes a resource collection from the Protect API.
     ///
-    /// This method implements a simple caching strategy: if data exists in the cache,
-    /// it returns the cached data; otherwise, it fetches from the API and caches the result.
+    /// Caching lives in the three public accessors rather than here, deliberately. The previous
+    /// shape took the cache as `inout` and wrote it after an `await`, which holds an exclusive
+    /// access across a suspension point — an exclusivity hazard the compiler names outright
+    /// once the type is an `actor`:
     ///
-    /// - Parameter cache: An inout reference to the cache variable
+    /// ```
+    /// error: actor-isolated property 'cachedCameras' cannot be passed 'inout' to 'async' function call
+    /// ```
+    ///
+    /// Returning the value and letting the caller assign it keeps every mutation of isolated
+    /// state on one side of the `await`.
+    ///
     /// - Returns: An array of objects conforming to `ProtectFetchable`
     /// - Throws: An error if the API request or parsing fails
-    private func fetchAndCache<T: ProtectFetchable>(cache: inout [T]?) async throws -> [T] {
-        if let cached = cache {
-            logger.debug("Returning cached result for \(T.urlSuffix)")
-            return cached
-        }
+    private func fetch<T: ProtectFetchable>() async throws -> [T] {
         logger.debug(
             "Loading \(T.urlSuffix, privacy: .public) data from server.  Should happen only once!")
         let data = try await request(path: T.urlSuffix, accepting: .json)
-        let result = try T.parse(data)
-        cache = result
-        return result
+        return try T.parse(data)
     }
 
     /// Makes an HTTP request to the Protect API

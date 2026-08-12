@@ -10,7 +10,7 @@
 /// This struct contains the basic information about a camera, including its ID, name, state,
 /// microphone settings, and video configuration. It conforms to `ProtectFetchable` for
 /// automatic API integration.
-public struct Camera: ProtectFetchable {
+public struct Camera: ProtectFetchable, Sendable {
     /// The API endpoint suffix for fetching cameras
     public static let urlSuffix = "cameras"
 

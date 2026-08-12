@@ -182,7 +182,8 @@ for camera in cameras {
 
 ### ProtectService
 
-The main service class for interacting with the Unifi Protect API.
+The main service type for interacting with the Unifi Protect API. An `actor` — see
+[Concurrency](#concurrency).
 
 #### Properties
 
@@ -190,7 +191,7 @@ The main service class for interacting with the Unifi Protect API.
 
 #### Methods
 
-- `init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true) throws` - Create a service, validating `host`
+- `init(host: String, apiKey: String, allowsSelfSignedCertificate: Bool = true, session: URLSession? = nil) throws` - Create a service, validating `host`; pass `session` to stub the transport in tests
 - `cameras() async throws -> [Camera]` - Fetch all cameras (cached after first call)
 - `liveviews() async throws -> [Liveview]` - Fetch all liveviews (cached)
 - `viewports() async throws -> [Viewport]` - Fetch all viewports (cached)
@@ -261,15 +262,48 @@ Current test coverage includes:
 - Extension utilities (String padding, async array mapping)
 - JSON parsing for all data models
 - CSV export functionality
-- Service initialization and URL construction
+- Service initialization, host validation, and URL construction
 - Lookup functions with case-insensitive matching
-- Caching behavior
+- Caching: cold-cache fetches once, warm cache issues no request, a failed fetch isn't cached
+- HTTP failure paths: non-2xx carries the status and the server's body, malformed JSON throws
+- Request construction: the API key header, the PATCH body, the `highQuality` query
+- Concurrent use of one service from a task group
+
+Nothing in the suite touches the network. Requests are intercepted by a `URLProtocol` stub
+installed on a `URLSession` that tests pass to
+`ProtectService.init(host:apiKey:allowsSelfSignedCertificate:session:)` — the same injection
+point available to you if you need to stub Protect in your own tests.
 
 ## How It Works
+
+### Concurrency
+
+`ProtectService` is an `actor`, so a single instance can be shared across tasks:
+
+```swift
+let service = try ProtectService(host: "192.168.1.100", apiKey: key)
+
+try await withThrowingTaskGroup(of: Void.self) { group in
+    group.addTask { print(try await service.cameras().count) }
+    group.addTask { print(try await service.liveviews().count) }
+}
+```
+
+The public API was already `async throws`, so this costs existing call sites nothing. `baseURL`
+is `nonisolated` and stays synchronously readable. `Camera`, `Liveview`, `Slot`, and `Viewport`
+are `Sendable`, so results cross isolation boundaries freely.
+
+Actors are reentrant: two tasks that call `cameras()` simultaneously on a cold cache may both
+fetch, and the second result replaces the first. The values are identical, so this is wasted
+work rather than a wrong answer.
 
 ### Caching
 
 The service automatically caches API responses for cameras, liveviews, and viewports after the first request. This dramatically reduces API load and improves performance for subsequent calls.
+
+A failed fetch is not cached, so a later call retries. There is still no way to *invalidate* a
+populated cache — a long-lived service never sees server-side changes, and callers needing
+fresh data must construct a new one.
 
 ### API Integration
 
