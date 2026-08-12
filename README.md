@@ -10,6 +10,9 @@ A Swift package for interacting with a subset of the Unifi Protect API, providin
 - 🔄 **Smart Caching** - Built-in caching to minimize API calls
 - 📊 **CSV Export** - Export data to CSV format for analysis
 - ⚡ **Async/Await** - Modern Swift concurrency support
+- 🔒 **TLS** - HTTPS throughout, with an explicit opt-out for a console's self-signed certificate
+- 🧵 **Sendable** - `ProtectService` is an `actor`; models are `Sendable`, so results cross isolation boundaries
+- 🎯 **Typed Errors** - Every failure is a `ProtectError` you can pattern-match, carrying the console's own explanation
 - 🔍 **Case-Insensitive Lookups** - Find resources by name without case sensitivity
 
 ## Requirements
@@ -26,9 +29,13 @@ Add Protect to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/PeteRichardson/Protect.git", from: "1.0.0")
+    .package(url: "https://github.com/PeteRichardson/Protect.git", from: "2.0.0")
 ]
 ```
+
+> **Upgrading from 1.0.0?** 2.0.0 is a breaking release. The initializer now `throws`,
+> `ProtectService` is an `actor`, errors are `ProtectError` rather than `NSError`, and
+> `base_url` is `baseURL`. See [Migrating from 1.0.0](#migrating-from-100).
 
 Then add it to your target dependencies:
 
@@ -367,6 +374,44 @@ do {
     print("Failed to fetch cameras: \(error)")
 }
 ```
+
+## Migrating from 1.0.0
+
+Four breaking changes. In practice a 1.0.0 consumer needs `try` at each construction site and
+nothing else — that was the entire cost for [camview](https://github.com/PeteRichardson/camview),
+this package's primary consumer.
+
+**1. The initializer throws.** A bad host is now rejected at construction instead of trapping
+on a force-unwrapped URL at the first request.
+
+```diff
+- let service = ProtectService(host: config.host, apiKey: config.apiKey)
++ let service = try ProtectService(host: config.host, apiKey: config.apiKey)
+```
+
+It is *not* `async` — `ProtectService` is an actor, but an actor's initializer is nonisolated,
+so `try await` here is a redundant `await` and the compiler will warn about it.
+
+**2. `ProtectService` is an `actor`.** Call sites already using `try await` are unaffected,
+since the whole API was `async throws` before. Two things that do change: the type can no
+longer be subclassed, and holding one in non-isolated shared state may need `await`. `baseURL`
+is `nonisolated` and stays synchronously readable.
+
+**3. `NSError` is replaced by `ProtectError`.** Only affects code matching on the
+`"ProtectService"` domain or on code `1001`; catching generically still works, and the message
+text improves — a failed request now carries the console's own JSON explanation.
+
+```diff
+- catch let error as NSError where error.code == 404 {
++ catch ProtectError.httpStatus(404, let body) {
+```
+
+**4. `base_url` → `baseURL`.** It was internal in 1.0.0, so this only affects code using
+`@testable import`.
+
+Also new, and additive: TLS is on by default with `allowsSelfSignedCertificate` to control
+trust, `getSnapshot(with: true)` actually requests a full-resolution image, the lookup helpers
+are `public`, viewports can be addressed by name, and requests time out after 15s instead of 60.
 
 ## License
 
