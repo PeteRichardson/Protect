@@ -10,7 +10,7 @@ import Foundation
 /// Represents a slot in a liveview layout
 ///
 /// Each slot can display one or more cameras and defines how they cycle through views.
-public struct Slot: Decodable {
+public struct Slot: Decodable, Sendable {
     /// Array of camera IDs to display in this slot
     public var cameras: [String]
     /// The mode for cycling through cameras (e.g., "default", "timelapse")
@@ -23,7 +23,7 @@ public struct Slot: Decodable {
 ///
 /// A liveview is a pre-configured layout that displays one or more cameras in a grid.
 /// Each slot in the layout can show multiple cameras that cycle through at specified intervals.
-public struct Liveview: ProtectFetchable {
+public struct Liveview: ProtectFetchable, Sendable {
 
     /// The API endpoint suffix for fetching liveviews
     public static let urlSuffix = "liveviews"

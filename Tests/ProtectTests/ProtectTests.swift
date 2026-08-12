@@ -336,18 +336,6 @@ func testInvalidHostErrorIsDescriptive() {
 
 // MARK: - ProtectError Tests
 
-@Test("getSnapshot throws cameraNotFound for an unknown camera")
-func testGetSnapshotThrowsCameraNotFound() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-    service.mockCameras = [
-        Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off")
-    ]
-
-    await #expect(throws: ProtectError.cameraNotFound("Back Yard")) {
-        _ = try await service.getSnapshot(from: "Back Yard", with: false)
-    }
-}
-
 @Test("cameraNotFound error names the camera")
 func testCameraNotFoundIsDescriptive() {
     let error = ProtectError.cameraNotFound("Front Door")
@@ -380,6 +368,15 @@ func testInvalidResponseIsDescriptive() {
     #expect(error.errorDescription?.isEmpty == false)
 }
 
+@Test("viewportNotFound and liveviewNotFound name what was missing")
+func testNotFoundErrorsAreDescriptive() throws {
+    let viewport = try #require(ProtectError.viewportNotFound("Kitchen").errorDescription)
+    let liveview = try #require(ProtectError.liveviewNotFound("Main View").errorDescription)
+
+    #expect(viewport.contains("Kitchen"))
+    #expect(liveview.contains("Main View"))
+}
+
 // MARK: - Snapshot URL Tests
 
 @Test("A standard-quality snapshot URL carries no query")
@@ -403,67 +400,6 @@ func testSnapshotURLHighQuality() throws {
         url.absoluteString
             == "https://192.168.1.100/proxy/protect/integration/v1/cameras/cam1/snapshot?highQuality=true"
     )
-}
-
-// MARK: - Name-Based Addressing Tests
-
-@Test("Lookup liveview ID by name is case insensitive")
-func testLookupLiveviewIdByName() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-    service.mockLiveviews = [
-        Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 1, slots: [])
-    ]
-
-    let result = try await service.lookupLiveviewId(byName: "main view")
-
-    #expect(result == "lv1")
-}
-
-@Test("Lookup liveview ID returns nil for an unknown name")
-func testLookupLiveviewIdNotFound() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-    service.mockLiveviews = []
-
-    let result = try await service.lookupLiveviewId(byName: "Nope")
-
-    #expect(result == nil)
-}
-
-@Test("Changing a viewport by name rejects an unknown viewport before any request")
-func testChangeViewportByNameUnknownViewport() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-    service.mockViewports = []
-    service.mockLiveviews = [
-        Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 1, slots: [])
-    ]
-
-    await #expect(throws: ProtectError.viewportNotFound("Kitchen")) {
-        try await service.changeViewportView(
-            onViewportNamed: "Kitchen", toLiveviewNamed: "Main View")
-    }
-}
-
-@Test("Changing a viewport by name rejects an unknown liveview before any request")
-func testChangeViewportByNameUnknownLiveview() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-    service.mockViewports = [
-        Viewport(id: "vp1", liveview: "lv1", name: "Kitchen", state: "ACTIVE", streamLimit: 4)
-    ]
-    service.mockLiveviews = []
-
-    await #expect(throws: ProtectError.liveviewNotFound("Main View")) {
-        try await service.changeViewportView(
-            onViewportNamed: "Kitchen", toLiveviewNamed: "Main View")
-    }
-}
-
-@Test("viewportNotFound and liveviewNotFound name what was missing")
-func testNotFoundErrorsAreDescriptive() throws {
-    let viewport = try #require(ProtectError.viewportNotFound("Kitchen").errorDescription)
-    let liveview = try #require(ProtectError.liveviewNotFound("Main View").errorDescription)
-
-    #expect(viewport.contains("Kitchen"))
-    #expect(liveview.contains("Main View"))
 }
 
 // MARK: - Error Body Rendering Tests
@@ -498,90 +434,501 @@ func testErrorBodyLongIsTruncated() throws {
     #expect(rendered.lowercased().contains("truncated"))
 }
 
-@Test("Lookup camera ID returns nil for nonexistent camera")
-func testLookupCameraNotFound() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
+// MARK: - Networking and Caching Tests
+//
+// These drive the real `request` / caching path through a stubbed `URLProtocol`, which is
+// what the injectable session exists for. The suite is `.serialized` because `StubURLProtocol`
+// registers its canned responses in process-wide static state — `URLSession` instantiates
+// protocol objects on its own threads, so there is nowhere task-local to put them.
 
-    let mockCameras = [
-        Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off"),
-        Camera(id: "cam2", state: "CONNECTED", name: "Back Yard", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off")
-    ]
-    service.mockCameras = mockCameras
+@Suite("Networking", .serialized)
+struct NetworkingTests {
 
-    let result = try await service.lookupCameraId(byName: "Nonexistent")
-
-    #expect(result == nil)
-}
-
-@Test("Lookup camera ID is case insensitive")
-func testLookupCameraCaseInsensitive() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-
-    let mockCameras = [
-        Camera(id: "cam1", state: "CONNECTED", name: "Front Door", isMicEnabled: false, micVolume: 0, videoMode: "default", hdrType: "off")
-    ]
-    service.mockCameras = mockCameras
-
-    let result1 = try await service.lookupCameraId(byName: "front door")
-    let result2 = try await service.lookupCameraId(byName: "FRONT DOOR")
-    let result3 = try await service.lookupCameraId(byName: "Front Door")
-
-    #expect(result1 == "cam1")
-    #expect(result2 == "cam1")
-    #expect(result3 == "cam1")
-}
-
-@Test("Lookup liveview name by ID")
-func testLookupLiveviewName() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-
-    let mockLiveviews = [
-        Liveview(id: "lv1", name: "Main View", isDefault: true, isGlobal: false, owner: "admin", layout: 4, slots: []),
-        Liveview(id: "lv2", name: "Alternate View", isDefault: false, isGlobal: false, owner: "admin", layout: 2, slots: [])
-    ]
-    service.mockLiveviews = mockLiveviews
-
-    let result1 = try await service.lookupLiveviewName(byId: "lv1")
-    let result2 = try await service.lookupLiveviewName(byId: "lv2")
-    let result3 = try await service.lookupLiveviewName(byId: "nonexistent")
-
-    #expect(result1 == "Main View")
-    #expect(result2 == "Alternate View")
-    #expect(result3 == nil)
-}
-
-@Test("Lookup viewport ID by name is case insensitive")
-func testLookupViewportCaseInsensitive() async throws {
-    let service = try MockProtectService(host: "test.local", apiKey: "key")
-
-    let mockViewports = [
-        Viewport(id: "vp1", liveview: "lv1", name: "Living Room", state: "ACTIVE", streamLimit: 4)
-    ]
-    service.mockViewports = mockViewports
-
-    let result1 = try await service.lookupViewportId(byName: "living room")
-    let result2 = try await service.lookupViewportId(byName: "LIVING ROOM")
-
-    #expect(result1 == "vp1")
-    #expect(result2 == "vp1")
-}
-
-// MARK: - Mock Service for Testing
-
-class MockProtectService: ProtectService {
-    var mockCameras: [Camera]?
-    var mockLiveviews: [Liveview]?
-    var mockViewports: [Viewport]?
-
-    override func cameras() async throws -> [Camera] {
-        return mockCameras ?? []
+    /// Builds a service wired to the stub, with no cameras/liveviews/viewports configured.
+    private func makeService() throws -> ProtectService {
+        try ProtectService(
+            host: "test.local", apiKey: "test-key", session: StubURLProtocol.makeSession())
     }
 
-    override func liveviews() async throws -> [Liveview] {
-        return mockLiveviews ?? []
+    init() {
+        StubURLProtocol.reset()
     }
 
-    override func viewports() async throws -> [Viewport] {
-        return mockViewports ?? []
+    // MARK: Caching
+
+    @Test("A cold cache fetches once, and a second call does not hit the network")
+    func testCachePopulatesOnce() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        let first = try await service.cameras()
+        let second = try await service.cameras()
+
+        #expect(first.count == 2)
+        #expect(second.count == 2)
+        #expect(StubURLProtocol.requests(matching: "/cameras").count == 1)
+    }
+
+    @Test("Each resource type caches independently")
+    func testCachesAreIndependent() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        StubURLProtocol.stub(path: "/viewers", json: Fixtures.oneViewport)
+        let service = try makeService()
+
+        _ = try await service.cameras()
+        _ = try await service.viewports()
+        _ = try await service.cameras()
+
+        #expect(StubURLProtocol.requests(matching: "/cameras").count == 1)
+        #expect(StubURLProtocol.requests(matching: "/viewers").count == 1)
+    }
+
+    @Test("A failed fetch is not cached, so a later call retries")
+    func testFailedFetchIsNotCached() async throws {
+        StubURLProtocol.stub(path: "/cameras", status: 500, json: "{}")
+        let service = try makeService()
+
+        await #expect(throws: ProtectError.self) { _ = try await service.cameras() }
+
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let recovered = try await service.cameras()
+
+        #expect(recovered.count == 2)
+        #expect(StubURLProtocol.requests(matching: "/cameras").count == 2)
+    }
+
+    // MARK: Request construction
+
+    @Test("Every request carries the API key")
+    func testRequestSendsAPIKey() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        _ = try await service.cameras()
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/cameras").first)
+        #expect(recorded.headers["X-API-KEY"] == "test-key")
+    }
+
+    @Test("Fetches are GETs against the versioned integration path")
+    func testFetchIsGetOnIntegrationPath() async throws {
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        let service = try makeService()
+
+        _ = try await service.liveviews()
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/liveviews").first)
+        #expect(recorded.method == "GET")
+        #expect(recorded.url.contains("/proxy/protect/integration/v1/liveviews"))
+    }
+
+    // MARK: Failure paths
+
+    @Test("A non-2xx response throws httpStatus carrying the code and the server's body")
+    func testNonSuccessThrowsWithCodeAndBody() async throws {
+        StubURLProtocol.stub(
+            path: "/cameras", status: 401, json: "{\"error\":\"invalid api key\"}")
+        let service = try makeService()
+
+        await #expect(
+            throws: ProtectError.httpStatus(401, body: "{\"error\":\"invalid api key\"}")
+        ) {
+            _ = try await service.cameras()
+        }
+    }
+
+    @Test("A 404 with an empty body throws httpStatus with no body rather than an empty one")
+    func testNonSuccessWithEmptyBody() async throws {
+        StubURLProtocol.stub(path: "/cameras", status: 404, json: "")
+        let service = try makeService()
+
+        await #expect(throws: ProtectError.httpStatus(404, body: nil)) {
+            _ = try await service.cameras()
+        }
+    }
+
+    @Test("Malformed JSON surfaces as a decoding error, not as success")
+    func testMalformedJSONThrows() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: "{ this is not json ")
+        let service = try makeService()
+
+        await #expect(throws: DecodingError.self) {
+            _ = try await service.cameras()
+        }
+    }
+
+    @Test("JSON of the wrong shape surfaces as a decoding error")
+    func testWrongShapeJSONThrows() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: "[{\"unexpected\":true}]")
+        let service = try makeService()
+
+        await #expect(throws: DecodingError.self) {
+            _ = try await service.cameras()
+        }
+    }
+
+    // MARK: Writes
+
+    @Test("changeViewportView issues a PATCH carrying the liveview id")
+    func testChangeViewportViewIssuesPatch() async throws {
+        StubURLProtocol.stub(path: "/viewers/vp1", json: "{}")
+        let service = try makeService()
+
+        try await service.changeViewportView(on: "vp1", to: "lv9")
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/viewers/vp1").first)
+        #expect(recorded.method == "PATCH")
+
+        let body = try #require(recorded.body)
+        let decoded = try JSONDecoder().decode([String: String].self, from: body)
+        #expect(decoded == ["liveview": "lv9"])
+    }
+
+    @Test("The name-based viewport change resolves both names, then PATCHes by id")
+    func testChangeViewportViewByNameResolvesThenPatches() async throws {
+        StubURLProtocol.stub(path: "/viewers/vp1", json: "{}")
+        StubURLProtocol.stub(path: "/viewers", json: Fixtures.oneViewport)
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        let service = try makeService()
+
+        try await service.changeViewportView(
+            onViewportNamed: "kitchen display", toLiveviewNamed: "all cameras")
+
+        let recorded = try #require(StubURLProtocol.requests(matching: "/viewers/vp1").first)
+        #expect(recorded.method == "PATCH")
+
+        let body = try #require(recorded.body)
+        let decoded = try JSONDecoder().decode([String: String].self, from: body)
+        #expect(decoded == ["liveview": "lv1"])
+    }
+
+    // MARK: Snapshots
+
+    @Test("getSnapshot resolves the camera name and returns the image bytes")
+    func testGetSnapshotReturnsImageData() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        StubURLProtocol.stub(path: "/cameras/cam1/snapshot", data: Data([0xFF, 0xD8, 0xFF, 0xE0]))
+        let service = try makeService()
+
+        let image = try await service.getSnapshot(from: "front door", with: false)
+
+        #expect(image == Data([0xFF, 0xD8, 0xFF, 0xE0]))
+    }
+
+    @Test("A high-quality snapshot request carries highQuality=true on the wire")
+    func testGetSnapshotHighQualityQueryReachesTheWire() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        StubURLProtocol.stub(path: "/cameras/cam1/snapshot", data: Data([0xFF, 0xD8]))
+        let service = try makeService()
+
+        _ = try await service.getSnapshot(from: "Front Door", with: true)
+
+        let recorded = try #require(
+            StubURLProtocol.requests(matching: "/cameras/cam1/snapshot").first)
+        #expect(recorded.query == "highQuality=true")
+    }
+
+    @Test("An unsupported high-quality snapshot surfaces the console's own explanation")
+    func testGetSnapshotHighQualityRejection() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        StubURLProtocol.stub(
+            path: "/cameras/cam1/snapshot", status: 400,
+            json: "{\"error\":\"Camera does not support full HD snapshot\",\"name\":\"BAD_REQUEST\"}")
+        let service = try makeService()
+
+        await #expect(
+            throws: ProtectError.httpStatus(
+                400,
+                body:
+                    "{\"error\":\"Camera does not support full HD snapshot\",\"name\":\"BAD_REQUEST\"}"
+            )
+        ) {
+            _ = try await service.getSnapshot(from: "Front Door", with: true)
+        }
+    }
+
+    // MARK: Lookups
+
+    @Test("Lookup camera ID is case insensitive")
+    func testLookupCameraCaseInsensitive() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        #expect(try await service.lookupCameraId(byName: "FRONT DOOR") == "cam1")
+        #expect(try await service.lookupCameraId(byName: "front door") == "cam1")
+    }
+
+    @Test("Lookup camera ID returns nil for a nonexistent camera")
+    func testLookupCameraNotFound() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        #expect(try await service.lookupCameraId(byName: "Nonexistent") == nil)
+    }
+
+    @Test("Lookup liveview name by ID")
+    func testLookupLiveviewName() async throws {
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        let service = try makeService()
+
+        #expect(try await service.lookupLiveviewName(byId: "lv1") == "All Cameras")
+        #expect(try await service.lookupLiveviewName(byId: "nope") == nil)
+    }
+
+    @Test("Lookup liveview ID by name is case insensitive")
+    func testLookupLiveviewIdByName() async throws {
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        let service = try makeService()
+
+        #expect(try await service.lookupLiveviewId(byName: "all cameras") == "lv1")
+        #expect(try await service.lookupLiveviewId(byName: "Nope") == nil)
+    }
+
+    @Test("Lookup viewport ID by name is case insensitive")
+    func testLookupViewportCaseInsensitive() async throws {
+        StubURLProtocol.stub(path: "/viewers", json: Fixtures.oneViewport)
+        let service = try makeService()
+
+        #expect(try await service.lookupViewportId(byName: "KITCHEN DISPLAY") == "vp1")
+    }
+
+    // MARK: Name resolution failures
+
+    @Test("getSnapshot throws cameraNotFound for an unknown camera")
+    func testGetSnapshotThrowsCameraNotFound() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        let service = try makeService()
+
+        // "Garage" is deliberately absent from the fixture. Naming a camera that *is* present
+        // would resolve fine and then 404 on the unstubbed snapshot path, which passes for the
+        // wrong reason.
+        await #expect(throws: ProtectError.cameraNotFound("Garage")) {
+            _ = try await service.getSnapshot(from: "Garage", with: false)
+        }
+    }
+
+    @Test("Changing a viewport by name rejects an unknown viewport before any PATCH")
+    func testChangeViewportByNameUnknownViewport() async throws {
+        StubURLProtocol.stub(path: "/viewers", json: "[]")
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        let service = try makeService()
+
+        await #expect(throws: ProtectError.viewportNotFound("Kitchen")) {
+            try await service.changeViewportView(
+                onViewportNamed: "Kitchen", toLiveviewNamed: "All Cameras")
+        }
+        #expect(StubURLProtocol.requests(matching: "PATCH").isEmpty)
+    }
+
+    @Test("Changing a viewport by name rejects an unknown liveview before any PATCH")
+    func testChangeViewportByNameUnknownLiveview() async throws {
+        StubURLProtocol.stub(path: "/viewers", json: Fixtures.oneViewport)
+        StubURLProtocol.stub(path: "/liveviews", json: "[]")
+        let service = try makeService()
+
+        await #expect(throws: ProtectError.liveviewNotFound("All Cameras")) {
+            try await service.changeViewportView(
+                onViewportNamed: "Kitchen Display", toLiveviewNamed: "All Cameras")
+        }
+        #expect(StubURLProtocol.requests(matching: "PATCH").isEmpty)
+    }
+
+    // MARK: Concurrency
+
+    @Test("One service instance is safely shared across concurrent tasks")
+    func testConcurrentAccessFromTaskGroup() async throws {
+        StubURLProtocol.stub(path: "/cameras", json: Fixtures.twoCameras)
+        StubURLProtocol.stub(path: "/liveviews", json: Fixtures.oneLiveview)
+        StubURLProtocol.stub(path: "/viewers", json: Fixtures.oneViewport)
+        let service = try makeService()
+
+        // This is the shape #8 reported as a compile error against the old non-Sendable class:
+        // "non-Sendable type 'ProtectService' of let 'service' cannot exit main actor-isolated
+        // context". That it compiles at all is the regression test.
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            for _ in 0..<8 {
+                group.addTask { try await service.cameras().count }
+                group.addTask { try await service.liveviews().count }
+                group.addTask { try await service.viewports().count }
+            }
+            var total = 0
+            for try await count in group { total += count }
+            #expect(total == 8 * (2 + 1 + 1))
+        }
+    }
+}
+
+// MARK: - Fixtures
+
+enum Fixtures {
+    static let twoCameras = """
+        [
+          {"id":"cam1","name":"Front Door","state":"CONNECTED","isMicEnabled":false,
+           "micVolume":0,"videoMode":"default","hdrType":"off"},
+          {"id":"cam2","name":"Back Yard","state":"CONNECTED","isMicEnabled":true,
+           "micVolume":50,"videoMode":"default","hdrType":"off"}
+        ]
+        """
+
+    static let oneLiveview = """
+        [
+          {"id":"lv1","name":"All Cameras","isDefault":true,"isGlobal":false,
+           "owner":"admin","layout":4,"slots":[]}
+        ]
+        """
+
+    static let oneViewport = """
+        [
+          {"id":"vp1","name":"Kitchen Display","liveview":"lv1","state":"ACTIVE","streamLimit":4}
+        ]
+        """
+}
+
+// MARK: - URLProtocol Stub
+//
+// Replaces the former `MockProtectService`, which subclassed `ProtectService` and overrode
+// `cameras()` / `liveviews()` / `viewports()` — the very methods that call the networking and
+// caching code, so everything worth testing was bypassed rather than exercised. Subclassing is
+// also impossible now that `ProtectService` is an `actor`.
+
+/// A `URLProtocol` that answers requests from canned responses and records what it was asked.
+///
+/// Registered on a `URLSessionConfiguration` and injected via
+/// `ProtectService.init(host:apiKey:allowsSelfSignedCertificate:session:)`, so requests are
+/// intercepted below `URLSession` without any network access.
+///
+/// State is static and lock-guarded because `URLSession` instantiates protocol objects itself,
+/// on its own threads — there is no instance for a test to hold and no task-local context to
+/// use. `NetworkingTests` is `.serialized` for the same reason.
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+
+    /// A request the stub answered, captured for assertions.
+    struct Recorded: Sendable {
+        let method: String
+        let url: String
+        let path: String
+        let query: String?
+        let body: Data?
+        let headers: [String: String]
+    }
+
+    private struct Response {
+        let status: Int
+        let data: Data
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var responses: [String: Response] = [:]
+    nonisolated(unsafe) private static var recorded: [Recorded] = []
+
+    // MARK: Test-facing API
+
+    /// Builds a session that routes every request through this stub.
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    /// Clears all canned responses and the recorded request log.
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        responses = [:]
+        recorded = []
+    }
+
+    /// Registers a JSON (or arbitrary text) response for a path suffix.
+    static func stub(path: String, status: Int = 200, json: String) {
+        stub(path: path, status: status, data: Data(json.utf8))
+    }
+
+    /// Registers a raw-bytes response for a path suffix — used for snapshot image data.
+    static func stub(path: String, status: Int = 200, data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        responses[path] = Response(status: status, data: data)
+    }
+
+    /// Every recorded request whose method, URL, or path contains `fragment`.
+    static func requests(matching fragment: String) -> [Recorded] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.filter {
+            $0.path.hasSuffix(fragment) || $0.url.contains(fragment) || $0.method == fragment
+        }
+    }
+
+    // MARK: URLProtocol
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = components?.path ?? url.path
+
+        Self.lock.lock()
+        Self.recorded.append(
+            Recorded(
+                method: request.httpMethod ?? "GET",
+                url: url.absoluteString,
+                path: path,
+                query: components?.query,
+                body: Self.bodyData(from: request),
+                headers: request.allHTTPHeaderFields ?? [:]))
+        // Longest matching suffix wins, so "/viewers/vp1" is not shadowed by "/viewers".
+        let match =
+            Self.responses
+            .filter { path.hasSuffix($0.key) }
+            .max { $0.key.count < $1.key.count }?
+            .value
+        Self.lock.unlock()
+
+        let response = match ?? Response(status: 404, data: Data())
+
+        guard
+            let httpResponse = HTTPURLResponse(
+                url: url, statusCode: response.status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"])
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
+        if !response.data.isEmpty {
+            client?.urlProtocol(self, didLoad: response.data)
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    /// Reads a request body from either `httpBody` or `httpBodyStream`.
+    ///
+    /// `URLProtocol` receives the request after `URLSession` has converted `httpBody` into
+    /// `httpBodyStream`, so reading `httpBody` alone returns `nil` for every PATCH this
+    /// package sends — the trap that makes body assertions look impossible.
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody, !body.isEmpty { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        let bufferSize = 1024
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data.isEmpty ? nil : data
     }
 }

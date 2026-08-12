@@ -9,7 +9,7 @@
 ///
 /// A viewport is a physical or virtual display that shows a liveview. Viewports can be
 /// updated to display different liveviews dynamically.
-public struct Viewport: ProtectFetchable {
+public struct Viewport: ProtectFetchable, Sendable {
     /// The API endpoint suffix for fetching viewports
     public static let urlSuffix = "viewers"
 
